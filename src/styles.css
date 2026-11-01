@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #12130f;
+  --color-panel: #1b1d17;
+  --color-raise: #26291f;
+  --color-paper: #efe8d6;
+  --color-dim: #9a937f;
+  --color-line: #34382e;
+  --color-cinnabar: #e15a42;
+  --color-moss: #c5d36a;
+  --color-brass: #e0b15a;
+  --shadow-card: 0 0 0 1px rgba(239, 232, 214, 0.08);
+  --font-sans: "Noto Sans SC", "PingFang SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    margin: 0;
+    background: var(--color-ink);
+    color: var(--color-paper);
+    font-family: var(--font-sans);
+    text-wrap: pretty;
+  }
+  h1, h2, h3 { text-wrap: balance; }
+  button:not(:disabled),
+  [role="button"]:not(:disabled),
+  [role="switch"]:not(:disabled) { cursor: pointer; }
+  input, select, textarea { font: inherit; color: inherit; }
+  ::selection { background: var(--color-cinnabar); color: var(--color-ink); }
+  :focus-visible {
+    outline: 2px solid var(--color-brass);
+    outline-offset: 2px;
+  }
+}
+
+.safe-nav { padding-bottom: max(0.25rem, env(safe-area-inset-bottom)); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
