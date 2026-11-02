@@ -3,7 +3,8 @@ node_modules
 .vercel
 screenshots
 artifacts
-.grok
+.grok/*
+!.grok/app-env.json
 .project_id
 .node_modules.lock
 dist

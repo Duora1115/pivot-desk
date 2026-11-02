@@ -278,7 +278,9 @@ function tokenIdentityKey(token: string): string {
             .digest("base64url");
         }
       }
-    } catch {}
+    } catch {
+      /* malformed JWT payloads fall back to hashing the whole token */
+    }
   }
   return createHash("sha256").update(token).digest("base64url");
 }
@@ -393,15 +395,16 @@ export async function callTool(
     if (status === 401) {
       return unauthorizedResult(ctx, json, token);
     }
-    noteTokenAccepted(token);
     if (status === 403) {
+      noteTokenAccepted(token);
       return fail(json.errorMessage ?? "access_denied");
     }
+    if (status < 200 || status >= 300) {
+      return fail(json.errorMessage ?? `HTTP ${status}`);
+    }
+    noteTokenAccepted(token);
     if (json.errorMessage && json.ok === false) {
       return fail(json.errorMessage);
-    }
-    if (status >= 400 && json.ok !== true) {
-      return fail(json.errorMessage ?? `HTTP ${status}`);
     }
     if (json.ok === false) {
       return fail(json.errorMessage ?? "tool error");

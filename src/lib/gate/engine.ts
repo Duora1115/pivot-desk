@@ -14,8 +14,23 @@ export type Ccy = keyof typeof FX;
 export type Decision = "pass" | "block" | "review";
 export type Severity = "block" | "review" | "info";
 export type GateKind = "KEEP" | "KILL" | "WATCH" | "EXIT" | "SEQ";
+export type RulePresetId = "conservative-90" | "acceptance-20";
+export type Strategy = "intraday" | "swing" | "core" | "event";
+export type MarketStage = "1" | "2" | "3" | "4" | "unknown";
+export type Setup = "standard" | "bottom-fishing" | "stage4-bounce" | "event";
 
 export interface Plan {
+  id?: string;
+  createdAt?: string;
+  strategy?: Strategy | null;
+  counterargument?: string;
+  marketStage?: MarketStage;
+  setup?: Setup;
+  feeBudget?: string;
+  addConditions?: string;
+  exitConditions?: string;
+  eventDate?: string;
+  correlationGroup?: string;
   invalidation: string;
   maxNotional: string;
   maxDays: string;
@@ -26,6 +41,7 @@ export interface Plan {
 export type PivotState = "holds" | "gone";
 
 export interface Draft {
+  positionId?: string | null;
   broker: BrokerId;
   market: Market;
   symbol: string;
@@ -46,7 +62,23 @@ export interface Draft {
   pivotState: PivotState;
 }
 
-export interface Position {
+export interface RiskMetadata {
+  strategy?: Strategy | null;
+  correlationGroup?: string | null;
+  planId?: string | null;
+  planCreatedAt?: string | null;
+  setup?: Setup;
+  marketStage?: MarketStage;
+  plannedRiskCny?: number | null;
+  plannedRiskR?: number | null;
+  feeBudget?: number | null;
+  actualFee?: number | null;
+  fxRate?: number | null;
+  fxAsOf?: string | null;
+  invalidation?: number | null;
+}
+
+export interface Position extends RiskMetadata {
   id: string;
   broker: BrokerId;
   market: Market;
@@ -58,23 +90,67 @@ export interface Position {
   openedAt: string;
   pivotPrice: number;
   pivotNote: string;
+  currentPrice?: number | null;
+  priceAt?: string | null;
 }
 
-export interface CloseRecord {
+export interface CloseRecord extends RiskMetadata {
   id: string;
   broker: BrokerId;
   market: Market;
   symbol: string;
   name: string;
   closedAt: string;
-  pnlCny: number;
+  pnlCny: number | null;
   notionalCny: number;
+  closedAtTime?: string | null;
+}
+
+export interface FxSnapshot {
+  rate: number | null;
+  asOf: string;
+}
+
+export interface RegimeState {
+  startedAt: string;
+  violations: ViolationRecord[];
+  history?: { startedAt: string; endedAt: string; violations: ViolationRecord[] }[];
+}
+
+export interface ViolationRecord {
+  id: string;
+  at: string;
+  kind: string;
+  detail: string;
+}
+
+export interface CalendarWindow {
+  id: string;
+  start: string;
+  end: string;
+  createdAt: string;
+}
+
+export interface DailyMark {
+  date: string;
+  tradingDay: boolean;
+  strategy?: Strategy | null;
+  realizedCny: number | null;
+  unrealizedCny: number | null;
+  feesCny: number | null;
+  fxImpactCny: number | null;
 }
 
 export interface Settings {
   q5Cny: number;
   autoConfirm: boolean;
   rules: Record<string, boolean>;
+  presetId: RulePresetId;
+  netAssetCny: number | null;
+  fx: Record<Ccy, FxSnapshot>;
+  regimes: Record<RulePresetId, RegimeState>;
+  calendarWindows: CalendarWindow[];
+  dailyMarks: DailyMark[];
 }
 
 export interface Hit {
@@ -99,7 +175,7 @@ export interface Verdict {
   symbol: string;
 }
 
-export interface LedgerItem {
+export interface LedgerItem extends RiskMetadata {
   id: string;
   at: string;
   decision: Decision;
@@ -121,11 +197,16 @@ export interface LedgerItem {
   pivotNote: string;
   stamp: string;
   ticket?: string;
+  positionId?: string | null;
+  confirmedAt?: string | null;
   hits: Pick<Hit, "ruleId" | "title" | "severity" | "clause">[];
 }
 
 export interface DeskState {
-  version: 2;
+  version: 2 | 3;
+  revision: number;
+  mutationId: string;
+  contracts: Record<string, { draft: Draft; recordedAt: string }>;
   positions: Position[];
   closes: CloseRecord[];
   ledger: LedgerItem[];
@@ -334,11 +415,42 @@ export const IMPACT: { label: string; pnl: number; kind: "keep" | "kill" | "watc
 ];
 
 export function emptyPlan(): Plan {
-  return { invalidation: "", maxNotional: "", maxDays: "", thesis: "", approved: false };
+  return {
+    id: `PLAN-${crypto.randomUUID().toUpperCase()}`,
+    createdAt: new Date().toISOString(),
+    strategy: null,
+    counterargument: "",
+    marketStage: "unknown",
+    setup: "standard",
+    feeBudget: "",
+    addConditions: "",
+    exitConditions: "",
+    eventDate: "",
+    correlationGroup: "",
+    invalidation: "", maxNotional: "", maxDays: "", thesis: "", approved: false,
+  };
 }
 
 export function defaultRules(): Record<string, boolean> {
   return Object.fromEntries(TOGGLE_IDS.map((id) => [id, true]));
+}
+
+export function riskDefaults(startedAt: string): Pick<Settings, "presetId" | "netAssetCny" | "fx" | "regimes" | "calendarWindows" | "dailyMarks"> {
+  return {
+    presetId: "conservative-90",
+    netAssetCny: null,
+    fx: {
+      CNY: { rate: 1, asOf: startedAt },
+      HKD: { rate: null, asOf: "" },
+      USD: { rate: null, asOf: "" },
+    },
+    regimes: {
+      "conservative-90": { startedAt, violations: [] },
+      "acceptance-20": { startedAt, violations: [] },
+    },
+    calendarWindows: [],
+    dailyMarks: [],
+  };
 }
 
 const RANK: Record<string, number> = {
@@ -373,6 +485,10 @@ export function ccyOf(market: Market): Ccy {
   return "CNY";
 }
 
+export function canonicalGroup(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
 export function normSymbol(market: Market, symbol: string): string {
   const s = symbol.trim().toUpperCase();
   if (market === "HK" && /^\d+$/.test(s)) return s.padStart(5, "0");
@@ -403,7 +519,8 @@ export function positionNotional(pos: Position): number {
   return notionalCny(pos.qty, pos.price, pos.market, pos.asset);
 }
 
-export function findPosition(positions: Position[], draft: Pick<Draft, "broker" | "market" | "symbol" | "asset">): Position | undefined {
+export function findPosition(positions: Position[], draft: Pick<Draft, "broker" | "market" | "symbol" | "asset"> & { positionId?: string | null }): Position | undefined {
+  if (draft.positionId) return positions.find((position) => position.id === draft.positionId);
   const sym = normSymbol(draft.market, draft.symbol);
   return positions.find(
     (p) => p.broker === draft.broker && p.market === draft.market && p.asset === draft.asset && normSymbol(p.market, p.symbol) === sym,
@@ -468,10 +585,14 @@ export function formatAt(iso: string): string {
 
 export type Tone = "moss" | "cinnabar" | "brass" | "dim";
 
+export function compareCloseRecency(a: CloseRecord, b: CloseRecord): number {
+  return b.closedAt.localeCompare(a.closedAt);
+}
+
 export function classify(pos: Position, today = DESK_DATE): { label: string; tone: Tone } {
   const hold = holdOf(pos, today);
   if (pos.broker === "ht" && pos.market === "US" && hold > 0) return { label: "出血 · 华泰过夜", tone: "cinnabar" };
-  if (pos.market === "US" && pos.asset !== "option" && hold >= 4 && hold <= 30) return { label: "出血 · 4–30日", tone: "cinnabar" };
+  if (pos.market === "US" && pos.asset === "stock" && hold >= 4 && hold <= 30) return { label: "出血 · 4–30日", tone: "cinnabar" };
   if (pos.market === "HK" && hold >= 31) return { label: "出血 · 港股长持", tone: "cinnabar" };
   if (pos.asset === "option" && hold >= 4) return { label: "监测 · 期权", tone: "brass" };
   if (pos.market === "A" && hold >= 31) return { label: "监测 · A股长持", tone: "brass" };
@@ -481,6 +602,14 @@ export function classify(pos: Position, today = DESK_DATE): { label: string; ton
   if (pos.market === "HK" && hold <= 30) return { label: "港股短炒", tone: "moss" };
   if (pos.market === "US" && hold > 0 && hold <= 3) return { label: "短持 · 1–3日", tone: "brass" };
   return { label: "观察", tone: "dim" };
+}
+
+export function needsPlanPanel(draft: Draft, verdict: Verdict): boolean {
+  const opening = draft.intent === "open" || draft.intent === "add" || draft.intent === "t0";
+  const usShortPlan = draft.market === "US" && draft.asset !== "option" && verdict.hold >= 1 &&
+    (verdict.hold <= 3 || verdict.hold > 30 || draft.asset === "stock");
+  return opening && (draft.tag === "average" || usShortPlan ||
+    verdict.hits.some((hit) => hit.ruleId === "us-1-3" || hit.ruleId === "us-4-30" || hit.ruleId === "ht-overnight"));
 }
 
 function on(settings: Settings, id: string): boolean {
@@ -822,7 +951,7 @@ export function evaluate(draft: Draft, state: Pick<DeskState, "positions" | "clo
           clause: "us-1-3 off",
         }));
       }
-    } else if (hold <= 30) {
+    } else if (hold <= 30 && draft.asset === "stock") {
       if (!on(state.settings, "us-4-30")) {
         hits.push(hit({
           ruleId: "us-4-30",
@@ -851,7 +980,7 @@ export function evaluate(draft: Draft, state: Pick<DeskState, "positions" | "clo
           clause: "US & 4≤hold≤30",
         }));
       }
-    } else {
+    } else if (hold > 30) {
       hits.push(hit({
         ruleId: "us-long",
         severity: "info",
@@ -1063,7 +1192,7 @@ export function evaluate(draft: Draft, state: Pick<DeskState, "positions" | "clo
         detail: "涨乐全球通的美股隔夜历史在抽血。你暂时不拦。",
         clause: "ht-overnight off",
       }));
-    } else if (draft.asset !== "option" && exceptionOk(draft, orderNotional, Math.min(hold, 30))) {
+    } else if (draft.asset !== "option" && exceptionOk(draft, orderNotional, hold)) {
       hits.push(hit({
         ruleId: "ht-overnight",
         severity: "info",
@@ -1088,11 +1217,11 @@ export function evaluate(draft: Draft, state: Pick<DeskState, "positions" | "clo
 
   const anchors = state.closes
     .filter((c) => {
-      if (c.pnlCny >= 0) return false;
+      if (typeof c.pnlCny !== "number" || c.pnlCny >= 0) return false;
       const age = daysBetween(c.closedAt, today);
       return Number.isFinite(age) && age >= 0 && age <= 3;
     })
-    .sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1));
+    .sort(compareCloseRecency);
   if (opening && anchors.length > 0 && on(state.settings, "revenge")) {
     const latest = anchors[0];
     if (orderNotional > latest.notionalCny) {
@@ -1101,7 +1230,7 @@ export function evaluate(draft: Draft, state: Pick<DeskState, "positions" | "clo
         severity: "block",
         gate: "SEQ",
         title: "亏后三日内名义放大",
-        detail: `锚点 ${latest.closedAt} ${latest.symbol} 亏损 ${formatCny(latest.pnlCny, true)}，名义 ${formatCny(latest.notionalCny)}。本笔 ${formatCny(orderNotional)} 更高。胜率可以仍过半，闸看的是金额。这不是「CI 已证明期望为负」。`,
+        detail: `锚点 ${latest.closedAt} ${latest.symbol} 亏损 ${formatCny(latest.pnlCny!, true)}，名义 ${formatCny(latest.notionalCny)}。本笔 ${formatCny(orderNotional)} 更高。胜率可以仍过半，闸看的是金额。这不是「CI 已证明期望为负」。`,
         clause: "loss≤3d & notional↑",
       }));
     } else if (orderNotional >= latest.notionalCny * 0.7) {
@@ -1222,12 +1351,13 @@ export function evaluate(draft: Draft, state: Pick<DeskState, "positions" | "clo
   };
 }
 
-export function applyToBook(positions: Position[], item: LedgerItem): Position[] {
+export function applyToBook(positions: Position[], item: LedgerItem, today = DESK_DATE): Position[] {
   if (item.decision !== "pass" || item.intent === "t0") return positions;
   const sym = normSymbol(item.market, item.symbol);
-  const match = (p: Position) =>
-    p.broker === item.broker && p.market === item.market && p.asset === item.asset && normSymbol(p.market, p.symbol) === sym;
-  const pos = positions.find(match);
+  const match = (p: Position) => item.positionId
+    ? p.id === item.positionId
+    : p.broker === item.broker && p.market === item.market && p.asset === item.asset && normSymbol(p.market, p.symbol) === sym;
+  const pos = findPosition(positions, item);
   if (item.intent === "close" || item.intent === "reduce") {
     if (!pos) return positions;
     const qty = pos.qty - item.qty;
@@ -1238,7 +1368,7 @@ export function applyToBook(positions: Position[], item: LedgerItem): Position[]
     return [
       ...positions,
       {
-        id: `p-${item.id}`,
+        id: item.positionId ?? `p-${item.id}`,
         broker: item.broker,
         market: item.market,
         symbol: sym,
@@ -1246,29 +1376,62 @@ export function applyToBook(positions: Position[], item: LedgerItem): Position[]
         asset: item.asset,
         qty: item.qty,
         price: item.price,
-        openedAt: DESK_DATE,
+        openedAt: today,
         pivotPrice: item.pivotPrice,
         pivotNote: item.pivotNote,
+        strategy: item.strategy ?? null,
+        correlationGroup: item.correlationGroup ?? null,
+        planId: item.planId ?? null,
+        planCreatedAt: item.planCreatedAt ?? null,
+        setup: item.setup ?? "standard",
+        marketStage: item.marketStage ?? "unknown",
+        plannedRiskCny: item.plannedRiskCny ?? null,
+        plannedRiskR: item.plannedRiskR ?? null,
+        feeBudget: item.feeBudget ?? null,
+        actualFee: item.actualFee ?? null,
+        fxRate: item.fxRate ?? null,
+        fxAsOf: item.fxAsOf ?? null,
+        currentPrice: item.price,
+        priceAt: item.at,
+        invalidation: item.invalidation ?? (item.pivotPrice || null),
       },
     ];
   }
   const qty = pos.qty + item.qty;
   const price = (pos.qty * pos.price + item.qty * item.price) / qty;
-  return positions.map((p) => (match(p) ? { ...p, qty, price } : p));
+  return positions.map((p) => (match(p) ? {
+    ...p,
+    qty,
+    price,
+    currentPrice: item.price,
+    priceAt: item.at,
+    strategy: p.strategy ?? item.strategy ?? null,
+    correlationGroup: p.correlationGroup ?? item.correlationGroup ?? null,
+    planId: p.planId ?? item.planId ?? null,
+    planCreatedAt: p.planCreatedAt ?? item.planCreatedAt ?? null,
+    setup: p.setup ?? item.setup ?? "standard",
+    marketStage: p.marketStage ?? item.marketStage ?? "unknown",
+    feeBudget: p.feeBudget ?? item.feeBudget ?? null,
+    fxRate: p.fxRate ?? item.fxRate ?? null,
+    fxAsOf: p.fxAsOf ?? item.fxAsOf ?? null,
+    invalidation: p.invalidation ?? item.invalidation ?? (item.pivotPrice || null),
+  } : p));
 }
 
 export function settle(
   positions: Position[],
   closes: CloseRecord[],
   item: LedgerItem,
+  today = DESK_DATE,
 ): { positions: Position[]; closes: CloseRecord[] } {
   const before = findPosition(positions, item);
-  const next = applyToBook(positions, item);
+  const next = applyToBook(positions, item, today);
   if (!before || item.decision !== "pass" || (item.intent !== "reduce" && item.intent !== "close")) {
     return { positions: next, closes };
   }
   const qty = Math.min(item.qty, before.qty);
-  const pnl = (item.price - before.price) * qty * multiplier(item.asset) * FX[ccyOf(item.market)];
+  const fxRate = item.fxRate !== undefined ? item.fxRate : before.fxRate !== undefined ? before.fxRate : FX[ccyOf(item.market)];
+  const pnl = fxRate === null ? null : (item.price - before.price) * qty * multiplier(item.asset) * fxRate;
   return {
     positions: next,
     closes: [
@@ -1278,17 +1441,31 @@ export function settle(
         market: item.market,
         symbol: normSymbol(item.market, item.symbol),
         name: item.name,
-        closedAt: DESK_DATE,
+        closedAt: today,
         pnlCny: pnl,
         notionalCny: notionalCny(qty, item.price, item.market, item.asset),
+        closedAtTime: item.confirmedAt ?? item.at,
+        strategy: before.strategy ?? item.strategy ?? null,
+        correlationGroup: before.correlationGroup ?? item.correlationGroup ?? null,
+        planId: before.planId ?? item.planId ?? null,
+        planCreatedAt: before.planCreatedAt ?? item.planCreatedAt ?? null,
+        setup: before.setup ?? item.setup ?? "standard",
+        marketStage: before.marketStage ?? item.marketStage ?? "unknown",
+        plannedRiskCny: before.plannedRiskCny ?? item.plannedRiskCny ?? null,
+        plannedRiskR: before.plannedRiskR ?? item.plannedRiskR ?? null,
+        feeBudget: before.feeBudget ?? item.feeBudget ?? null,
+        actualFee: item.actualFee ?? null,
+        fxRate: item.fxRate ?? before.fxRate ?? null,
+        fxAsOf: item.fxAsOf ?? before.fxAsOf ?? null,
+        invalidation: before.invalidation ?? item.invalidation ?? null,
       },
       ...closes,
     ],
   };
 }
 
-export function nid(): string {
-  return `NS-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+export function nid(randomId: () => string = () => crypto.randomUUID()): string {
+  return `NS-${randomId().toUpperCase()}`;
 }
 
 export function ticketNo(broker: BrokerId): string {
@@ -1304,7 +1481,7 @@ function draft(partial: Omit<Draft, "plan" | "optionExit" | "optionMaxLoss" | "r
     pivotNote: "",
     pivotState: "holds",
     ...partial,
-    plan: partial.plan ?? emptyPlan(),
+    plan: { ...emptyPlan(), ...partial.plan },
   };
 }
 
@@ -1454,11 +1631,14 @@ export function makeSeed(): DeskState {
     { id: "c3", broker: "gf", market: "A", symbol: "159792", name: "港股通互联", closedAt: "2026-10-17", pnlCny: 8200, notionalCny: 40000 },
   ];
   return {
-    version: 2,
+    version: 3,
+    revision: 0,
+    mutationId: "",
+    contracts: {},
     positions,
     closes,
     ledger: [],
-    settings: { q5Cny: 300000, autoConfirm: true, rules: defaultRules() },
+    settings: { q5Cny: 300000, autoConfirm: true, rules: defaultRules(), ...riskDefaults(DESK_DATE) },
     sessions: { gf: true, ht: true, futu: true },
     draft: PRESETS[0].draft,
     flash: "",
@@ -1473,6 +1653,8 @@ export function envelopeText(item: LedgerItem): string {
     `逻辑 ${item.pivotNote}`,
     `${intentLabel(item.intent)} · 有效持有 ${item.hold <= 0 ? "当日" : `${item.hold}日`}`,
     `名义 ${formatCny(item.notionalCny)}`,
+    `合同 ${item.planId ?? "历史无合同"} · 策略 ${item.strategy ?? "未分策略"}`,
+    `计划R ${item.plannedRiskR?.toFixed(3) ?? "未知"} · 费用预算 ${item.feeBudget ?? "未知"} · FX ${item.fxRate ?? "未知"}`,
     `戳 ${item.id}${item.ticket ? ` · ${item.ticket}` : ""}`,
     item.stamp,
   ].join("\n");

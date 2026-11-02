@@ -5,15 +5,20 @@ import {
   PRESETS,
   assetLabel,
   ccyOf,
+  compareCloseRecency,
   daysBetween,
   findPosition,
   formatCny,
   intentLabel,
+  needsPlanPanel,
   type Asset,
   type BrokerId,
   type Hit,
   type Intent,
   type Market,
+  type MarketStage,
+  type Setup,
+  type Strategy,
   type Tag,
   DESK_DATE,
 } from "@/lib/gate/engine";
@@ -40,11 +45,11 @@ export function Ticket() {
   const bookPos = findPosition(state.positions, d);
   const anchor = state.closes
     .filter((c) => {
-      if (c.pnlCny >= 0) return false;
+      if (typeof c.pnlCny !== "number" || c.pnlCny >= 0) return false;
       const age = daysBetween(c.closedAt, DESK_DATE);
       return Number.isFinite(age) && age >= 0 && age <= 3;
     })
-    .sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1))[0];
+    .sort(compareCloseRecency)[0];
   const sample = PRESETS.find(
     (p) =>
       p.draft.broker === d.broker &&
@@ -60,11 +65,7 @@ export function Ticket() {
     setDraft({ intent, side, holdDays: intent === "t0" ? 0 : d.holdDays });
   };
 
-  const needsPlan =
-    opening &&
-    (d.tag === "average" ||
-      (d.market === "US" && d.asset !== "option" && verdict.hold >= 1) ||
-      verdict.hits.some((h) => h.ruleId === "us-1-3" || h.ruleId === "us-4-30" || h.ruleId === "ht-overnight"));
+  const needsPlan = needsPlanPanel(d, verdict);
 
   return (
     <div className="flex flex-col gap-4">
@@ -223,24 +224,15 @@ export function Ticket() {
         </div>
       </Panel>
 
+      <ContractPanel />
+
       {needsPlan && (
         <Panel>
-          <h3 className="text-base font-medium">计划书</h3>
-          <p className="mt-1 text-sm text-dim">错误价、上限、天数、一句话。Q5 不能靠它豁免。</p>
-          <div className="mt-3 grid gap-3 sm:grid-cols-3">
-            <Field label="错误价">
-              <TextInput aria-label="错误价" inputMode="decimal" value={d.plan.invalidation} onChange={(e) => setPlan({ invalidation: e.target.value })} />
-            </Field>
+          <h3 className="text-base font-medium">历史限额审批</h3>
+          <p className="mt-1 text-sm text-dim">本笔名义上限与例外审批。Q5 不能靠它豁免。</p>
+          <div className="mt-3">
             <Field label="本笔上限 CNY">
               <TextInput aria-label="本笔上限" inputMode="decimal" value={d.plan.maxNotional} onChange={(e) => setPlan({ maxNotional: e.target.value })} />
-            </Field>
-            <Field label="最长天数">
-              <TextInput aria-label="最长天数" inputMode="numeric" value={d.plan.maxDays} onChange={(e) => setPlan({ maxDays: e.target.value })} />
-            </Field>
-          </div>
-          <div className="mt-3">
-            <Field label="一句话">
-              <TextInput aria-label="计划说明" mono={false} value={d.plan.thesis} onChange={(e) => setPlan({ thesis: e.target.value })} />
             </Field>
           </div>
           <button
@@ -280,6 +272,122 @@ export function Ticket() {
         <HitList />
       </div>
     </div>
+  );
+}
+
+function ContractPanel() {
+  const { state, verdict, setPlan } = useDesk();
+  const d = state.draft;
+  const reducing = d.intent === "reduce" || d.intent === "close";
+  if (reducing) {
+    return (
+      <Panel>
+        <h3 className="text-base font-medium">降险单</h3>
+        <p className="mt-1 text-sm leading-6 text-dim">减仓和平仓不因冷却、频率、预算或熔断被阻止；确认时仍会核对当前仓位。</p>
+      </Panel>
+    );
+  }
+  return (
+    <Panel>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-base font-medium">事前合同</h3>
+          <p className="mt-1 break-all font-mono text-xs text-dim">{d.plan.id} · {d.plan.createdAt}</p>
+        </div>
+        <p className="shrink-0 font-mono text-sm text-paper">
+          {verdict.risk.riskCny === null ? "R 未知" : `R ${formatCny(verdict.risk.riskCny)}`}
+        </p>
+      </div>
+      {verdict.risk.missing.length > 0 && (
+        <div role="alert" tabIndex={-1} className="mt-3 rounded-lg border border-cinnabar p-3 text-sm text-cinnabar">
+          待补：{verdict.risk.missing.join("、")}
+        </div>
+      )}
+      <div className="mt-4 flex flex-col gap-4">
+        <Field label="策略身份 · 成交后不可改">
+          <Seg<Strategy | "">
+            value={d.plan.strategy ?? ""}
+            onChange={(strategy) => setPlan({ strategy: strategy || null })}
+            columns={4}
+            options={[
+              { value: "", label: "未选" },
+              { value: "intraday", label: "日内" },
+              { value: "swing", label: "波段" },
+              { value: "core", label: "配置" },
+              { value: "event", label: "事件" },
+            ]}
+          />
+        </Field>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="市场阶段">
+            <Seg<MarketStage>
+              value={d.plan.marketStage ?? "unknown"}
+              onChange={(marketStage) => setPlan({ marketStage })}
+              columns={5}
+              options={[
+                { value: "1", label: "1" },
+                { value: "2", label: "2" },
+                { value: "3", label: "3" },
+                { value: "4", label: "4" },
+                { value: "unknown", label: "未知" },
+              ]}
+            />
+          </Field>
+          <Field label="交易设置">
+            <Seg<Setup>
+              value={d.plan.setup ?? "standard"}
+              onChange={(setup) => setPlan({ setup })}
+              columns={4}
+              options={[
+                { value: "standard", label: "标准" },
+                { value: "bottom-fishing", label: "抄底" },
+                { value: "stage4-bounce", label: "四段反弹" },
+                { value: "event", label: "事件" },
+              ]}
+            />
+          </Field>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="失效价">
+            <TextInput aria-label="失效价" inputMode="decimal" value={d.plan.invalidation} onChange={(e) => setPlan({ invalidation: e.target.value })} />
+          </Field>
+          <Field label="预期持有天数">
+            <TextInput aria-label="预期持有天数" inputMode="numeric" value={d.plan.maxDays} onChange={(e) => setPlan({ maxDays: e.target.value })} />
+          </Field>
+          <Field label={`费用预算 · ${ccyOf(d.market)}`}>
+            <TextInput aria-label="费用预算" inputMode="decimal" value={d.plan.feeBudget ?? ""} onChange={(e) => setPlan({ feeBudget: e.target.value })} />
+          </Field>
+        </div>
+        <Field label="开仓依据">
+          <TextInput aria-label="开仓依据" mono={false} value={d.plan.thesis} onChange={(e) => setPlan({ thesis: e.target.value })} />
+        </Field>
+        <Field label="反方论据">
+          <TextInput aria-label="反方论据" mono={false} value={d.plan.counterargument ?? ""} onChange={(e) => setPlan({ counterargument: e.target.value })} />
+        </Field>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="加仓条件">
+            <TextInput aria-label="加仓条件" mono={false} value={d.plan.addConditions ?? ""} onChange={(e) => setPlan({ addConditions: e.target.value })} />
+          </Field>
+          <Field label="退出条件">
+            <TextInput aria-label="退出条件" mono={false} value={d.plan.exitConditions ?? ""} onChange={(e) => setPlan({ exitConditions: e.target.value })} />
+          </Field>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="关联主题">
+            <TextInput aria-label="关联主题" mono={false} value={d.plan.correlationGroup ?? ""} onChange={(e) => setPlan({ correlationGroup: e.target.value })} />
+          </Field>
+          {d.plan.strategy === "event" && (
+            <Field label="事件日期">
+              <TextInput aria-label="事件日期" type="date" value={d.plan.eventDate ?? ""} onChange={(e) => setPlan({ eventDate: e.target.value })} />
+            </Field>
+          )}
+        </div>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-2 border-t border-line pt-3 font-mono text-xs text-dim">
+        <p>计划R {verdict.risk.riskR === null ? "未知" : verdict.risk.riskR.toFixed(3)}</p>
+        <p>现有开放风险 {verdict.open.totalCny === null ? `未知 ${verdict.open.unknown.length} 项` : formatCny(verdict.open.totalCny)}</p>
+      </div>
+    </Panel>
   );
 }
 

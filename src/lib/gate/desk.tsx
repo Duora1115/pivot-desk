@@ -1,158 +1,69 @@
-import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
-  DESK_DATE,
   emptyPlan,
-  evaluate,
   holdOf,
   makeSeed,
   nid,
-  settle,
   ticketNo,
   type BrokerId,
+  type CalendarWindow,
+  type Ccy,
+  type DailyMark,
   type DeskState,
   type Draft,
-  type LedgerItem,
   type Plan,
-  type Verdict,
-  PRESETS,
+  type Position,
+  type RulePresetId,
 } from "@/lib/gate/engine";
+import { deskReducer, migrateDeskState, type DeskAction } from "@/lib/gate/desk-state";
+import { evaluateWithPreset, type PresetVerdict } from "@/lib/gate/preset";
+import { shanghaiDate } from "@/lib/gate/ledger";
 
 const KEY = "pivot-desk-v2";
 
 export type Tab = "ticket" | "book" | "outbox" | "rules" | "channels";
 
-type Action =
-  | { type: "hydrate"; state: DeskState }
-  | { type: "draft"; patch: Partial<Draft> }
-  | { type: "plan"; patch: Partial<Plan> }
-  | { type: "preset"; id: string }
-  | { type: "rule"; id: string }
-  | { type: "q5"; value: number }
-  | { type: "auto" }
-  | { type: "session"; broker: BrokerId }
-  | { type: "flash"; text: string }
-  | { type: "commit"; item: LedgerItem; flash: string }
-  | { type: "deliver"; id: string; ticket: string }
-  | { type: "requeue"; id: string }
-  | { type: "confirm"; id: string }
-  | { type: "reset" };
-
-function patchDraft(draft: Draft, patch: Partial<Draft>): Draft {
-  const next = { ...draft, ...patch };
-  if (patch.plan) next.plan = { ...draft.plan, ...patch.plan };
-  return next;
-}
-
-function reducer(state: DeskState, action: Action): DeskState {
-  switch (action.type) {
-    case "hydrate":
-      return { ...action.state, flash: "" };
-    case "draft":
-      return { ...state, draft: patchDraft(state.draft, action.patch) };
-    case "plan":
-      return { ...state, draft: { ...state.draft, plan: { ...state.draft.plan, ...action.patch } } };
-    case "preset": {
-      const preset = PRESETS.find((p) => p.id === action.id);
-      return preset ? { ...state, draft: structuredClone(preset.draft) } : state;
-    }
-    case "rule":
-      return {
-        ...state,
-        settings: {
-          ...state.settings,
-          rules: { ...state.settings.rules, [action.id]: state.settings.rules[action.id] === false },
-        },
-      };
-    case "q5":
-      return { ...state, settings: { ...state.settings, q5Cny: action.value } };
-    case "auto":
-      return { ...state, settings: { ...state.settings, autoConfirm: !state.settings.autoConfirm } };
-    case "session":
-      return { ...state, sessions: { ...state.sessions, [action.broker]: !state.sessions[action.broker] } };
-    case "flash":
-      return { ...state, flash: action.text };
-    case "commit":
-      return { ...state, ledger: [action.item, ...state.ledger], flash: action.flash };
-    case "deliver": {
-      const item = state.ledger.find((row) => row.id === action.id);
-      if (!item || item.status !== "queued") return state;
-      const app = item.broker === "gf" ? "易淘金" : item.broker === "ht" ? "涨乐全球通" : "牛牛";
-      if (!state.sessions[item.broker]) {
-        return {
-          ...state,
-          ledger: state.ledger.map((row) => (row.id === action.id ? { ...row, status: "parked" } : row)),
-          flash: `${item.symbol} 闸已过，${app}会话掉线，改停在待挂起。`,
-        };
-      }
-      const delivered: LedgerItem = {
-        ...item,
-        status: "delivered",
-        ticket: action.ticket,
-        confirmed: state.settings.autoConfirm,
-      };
-      const settled = state.settings.autoConfirm
-        ? settle(state.positions, state.closes, delivered)
-        : { positions: state.positions, closes: state.closes };
-      return {
-        ...state,
-        ledger: state.ledger.map((row) => (row.id === action.id ? delivered : row)),
-        positions: settled.positions,
-        closes: settled.closes,
-        flash: state.settings.autoConfirm
-          ? `信封已记入转发簿。请到${app}里手工下单。`
-          : `信封已记下。你在这里确认后，底稿才变。券商里还要自己下。`,
-      };
-    }
-    case "requeue": {
-      const item = state.ledger.find((row) => row.id === action.id);
-      if (!item || item.status !== "parked") return state;
-      return {
-        ...state,
-        ledger: state.ledger.map((row) => (row.id === action.id ? { ...row, status: "queued", confirmed: false, ticket: undefined } : row)),
-        flash: "这封信封重新排队。还没送到券商。",
-      };
-    }
-    case "confirm": {
-      const item = state.ledger.find((row) => row.id === action.id);
-      if (!item || item.status !== "delivered" || item.confirmed || item.decision !== "pass") return state;
-      const next = { ...item, confirmed: true };
-      const settled = settle(state.positions, state.closes, next);
-      return {
-        ...state,
-        ledger: state.ledger.map((row) => (row.id === action.id ? next : row)),
-        positions: settled.positions,
-        closes: settled.closes,
-        flash: "底稿已按确认更新。券商里的成交以你手工下的那笔为准。",
-      };
-    }
-    case "reset":
-      return { ...makeSeed(), flash: "已恢复审计样本镜像。" };
-    default:
-      return state;
+function readLatest(): DeskState | null {
+  try {
+    return migrateDeskState(JSON.parse(localStorage.getItem(KEY) || "null"));
+  } catch {
+    return null;
   }
 }
 
-function sanitize(raw: unknown): DeskState | null {
-  if (!raw || typeof raw !== "object") return null;
-  const s = raw as DeskState;
-  if (s.version !== 2 || !s.draft?.plan || !s.settings || !Array.isArray(s.positions) || !Array.isArray(s.ledger)) return null;
-  if (!s.sessions || !Array.isArray(s.closes) || typeof s.settings.rules !== "object" || s.settings.rules === null) return null;
-  if (!Number.isFinite(Number(s.settings.q5Cny))) return null;
-  s.settings.q5Cny = Number(s.settings.q5Cny);
-  s.draft.pivotPrice = typeof s.draft.pivotPrice === "string" ? s.draft.pivotPrice : "";
-  s.draft.pivotNote = typeof s.draft.pivotNote === "string" ? s.draft.pivotNote : "";
-  s.draft.pivotState = s.draft.pivotState === "gone" ? "gone" : "holds";
-  s.positions = s.positions.map((p) => ({
-    ...p,
-    pivotPrice: Number(p.pivotPrice) || 0,
-    pivotNote: typeof p.pivotNote === "string" ? p.pivotNote : "",
-  }));
-  return s;
+async function withDeskLock(run: () => void): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.locks) {
+    await navigator.locks.request(`${KEY}-write`, run);
+    return;
+  }
+  const lockKey = `${KEY}-lock`;
+  const owner = crypto.randomUUID();
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const now = Date.now();
+    let current: { owner: string; expires: number } | null = null;
+    try { current = JSON.parse(localStorage.getItem(lockKey) || "null"); } catch { /* replace malformed lease */ }
+    if (!current || current.expires < now) {
+      localStorage.setItem(lockKey, JSON.stringify({ owner, expires: now + 2000 }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const confirmed = JSON.parse(localStorage.getItem(lockKey) || "null") as { owner?: string } | null;
+      if (confirmed?.owner === owner) {
+        try {
+          run();
+          return;
+        } finally {
+          const latest = JSON.parse(localStorage.getItem(lockKey) || "null") as { owner?: string } | null;
+          if (latest?.owner === owner) localStorage.removeItem(lockKey);
+        }
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("desk write lock timed out");
 }
 
 interface DeskApi {
   state: DeskState;
-  verdict: Verdict;
+  verdict: PresetVerdict;
   tab: Tab;
   setTab: (tab: Tab) => void;
   setDraft: (patch: Partial<Draft>) => void;
@@ -167,161 +78,195 @@ interface DeskApi {
   confirm: (id: string) => void;
   reset: () => void;
   loadPosition: (id: string, mode: "close" | "add") => void;
+  setRulePreset: (id: RulePresetId) => void;
+  setNetAsset: (value: number | null) => void;
+  setFx: (ccy: Ccy, rate: number | null, asOf: string) => void;
+  updatePosition: (id: string, patch: Partial<Position>) => void;
+  setActualFee: (id: string, value: number | null) => void;
+  addCalendarWindow: (window: CalendarWindow) => void;
+  removeCalendarWindow: (id: string) => void;
+  saveDailyMark: (mark: DailyMark) => void;
+  removeDailyMark: (date: string, strategy?: DailyMark["strategy"]) => void;
+  recordViolation: (kind: string, detail: string) => void;
+  resetRegime: (id: RulePresetId) => void;
 }
 
 const Ctx = createContext<DeskApi | null>(null);
 
 export function DeskProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(reducer, undefined, makeSeed);
-  const [tab, setTab] = useReducer((_: Tab, next: Tab) => next, "ticket" as Tab);
-  const [ready, setReady] = useState(false);
-  const timers = useRef<number[]>([]);
+  const [state, setState] = useState<DeskState>(makeSeed);
+  const stateRef = useRef(state);
+  const [tab, setTab] = useState<Tab>("ticket");
+  const timers = useRef(new Map<string, number>());
   const busy = useRef(false);
 
-  useEffect(() => {
+  const commit = useCallback((next: DeskState, persist = true) => {
+    const mutated = persist ? { ...next, mutationId: crypto.randomUUID() } : next;
+    stateRef.current = mutated;
+    setState(mutated);
+    if (!persist) return;
     try {
-      const saved = sanitize(JSON.parse(localStorage.getItem(KEY) || "null"));
-      if (saved) dispatch({ type: "hydrate", state: saved });
-    } catch {
-      /* bad JSON falls through; the next effect replaces it with the seed */
-    }
-    setReady(true);
-    return () => timers.current.forEach((id) => window.clearTimeout(id));
-  }, []);
-
-  useEffect(() => {
-    if (!ready) return;
-    try {
-      localStorage.setItem(KEY, JSON.stringify({ ...state, flash: "" }));
+      localStorage.setItem(KEY, JSON.stringify({ ...mutated, flash: "" }));
     } catch {
       /* private mode or quota */
     }
-  }, [state, ready]);
+  }, []);
+
+  const send = useCallback(async (action: DeskAction) => {
+    try {
+      await withDeskLock(() => {
+        const current = stateRef.current;
+        const stored = readLatest();
+        const base = stored && stored.revision >= current.revision ? stored : current;
+        const next = deskReducer(base, action);
+        if (next !== base) commit(next);
+      });
+    } catch {
+      commit({ ...stateRef.current, flash: "暂时无法取得账本写入锁，请稍后重试。" }, false);
+    }
+  }, [commit]);
+
+  const arm = useCallback((id: string, broker: BrokerId) => {
+    if (timers.current.has(id)) return;
+    const ticket = ticketNo(broker);
+    const timer = window.setTimeout(() => {
+      timers.current.delete(id);
+      busy.current = false;
+      send({ type: "deliver", id, ticket, at: new Date().toISOString() });
+    }, 680);
+    timers.current.set(id, timer);
+  }, [send]);
+
+  useEffect(() => {
+    const activeTimers = timers.current;
+    const saved = readLatest();
+    commit(saved ?? stateRef.current);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== KEY || !event.newValue) return;
+      try {
+        const incoming = migrateDeskState(JSON.parse(event.newValue));
+        if (incoming && (incoming.revision > stateRef.current.revision ||
+          (incoming.revision === stateRef.current.revision && incoming.mutationId !== stateRef.current.mutationId))) {
+          commit(incoming, false);
+        }
+      } catch {
+        /* ignore malformed writes from another tab */
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      activeTimers.forEach((timer) => window.clearTimeout(timer));
+      activeTimers.clear();
+    };
+  }, [commit]);
+
+  useEffect(() => {
+    for (const item of state.ledger) {
+      if (item.status === "queued") arm(item.id, item.broker);
+    }
+  }, [state.ledger, arm]);
 
   useEffect(() => {
     if (!state.flash) return;
-    const timer = window.setTimeout(() => dispatch({ type: "flash", text: "" }), 3400);
+    const timer = window.setTimeout(() => send({ type: "flash", text: "" }), 3400);
     return () => window.clearTimeout(timer);
-  }, [state.flash]);
+  }, [state.flash, send]);
 
-  const verdict = useMemo(() => evaluate(state.draft, state), [state]);
+  const verdict = useMemo(() => evaluateWithPreset(state.draft, state), [state]);
 
-  const api = useMemo<DeskApi>(() => {
-    const arm = (id: string, broker: BrokerId) => {
+  const api = useMemo<DeskApi>(() => ({
+    state,
+    verdict,
+    tab,
+    setTab,
+    setDraft: (patch) => send({ type: "draft", patch }),
+    setPlan: (patch) => send({ type: "plan", patch }),
+    applyPreset: (id) => send({ type: "preset", id }),
+    toggleRule: (id) => send({ type: "rule", id }),
+    setQ5: (value) => send({ type: "q5", value }),
+    toggleAuto: () => send({ type: "auto" }),
+    toggleSession: (broker) => send({ type: "session", broker }),
+    confirm: (id) => send({ type: "confirm", id, at: new Date().toISOString() }),
+    reset: () => send({ type: "reset" }),
+    setRulePreset: (id) => send({ type: "preset-risk", id }),
+    setNetAsset: (value) => send({ type: "capital", value }),
+    setFx: (ccy, rate, asOf) => send({ type: "fx", ccy, rate, asOf }),
+    updatePosition: (id, patch) => send({ type: "position-patch", id, patch }),
+    setActualFee: (id, value) => send({ type: "fee", id, value }),
+    addCalendarWindow: (window) => send({ type: "window-add", window }),
+    removeCalendarWindow: (id) => send({ type: "window-remove", id }),
+    saveDailyMark: (mark) => send({ type: "mark-save", mark }),
+    removeDailyMark: (date, strategy) => send({ type: "mark-remove", date, strategy }),
+    recordViolation: (kind, detail) => send({
+      type: "violation",
+      violation: { id: crypto.randomUUID(), at: new Date().toISOString(), kind, detail },
+    }),
+    resetRegime: (id) => send({ type: "regime-reset", id, at: new Date().toISOString() }),
+    requeue: async (id) => {
+      const item = state.ledger.find((row) => row.id === id);
+      if (!item || item.status !== "parked" || busy.current) return;
+      if (!state.sessions[item.broker]) {
+        await send({ type: "flash", text: "会话还没挂上。" });
+        return;
+      }
       busy.current = true;
-      const ticket = ticketNo(broker);
-      const timer = window.setTimeout(() => {
-        busy.current = false;
-        dispatch({ type: "deliver", id, ticket });
-      }, 680);
-      timers.current.push(timer);
-    };
-    return {
-      state,
-      verdict,
-      tab,
-      setTab,
-      setDraft: (patch) => dispatch({ type: "draft", patch }),
-      setPlan: (patch) => dispatch({ type: "plan", patch }),
-      applyPreset: (id) => dispatch({ type: "preset", id }),
-      toggleRule: (id) => dispatch({ type: "rule", id }),
-      setQ5: (value) => dispatch({ type: "q5", value }),
-      toggleAuto: () => dispatch({ type: "auto" }),
-      toggleSession: (broker) => dispatch({ type: "session", broker }),
-      confirm: (id) => dispatch({ type: "confirm", id }),
-      reset: () => dispatch({ type: "reset" }),
-      requeue: (id) => {
-        const item = state.ledger.find((row) => row.id === id);
-        if (!item || item.status !== "parked" || busy.current) return;
-        if (!state.sessions[item.broker]) {
-          dispatch({ type: "flash", text: "会话还没挂上。" });
-          return;
-        }
-        dispatch({ type: "requeue", id });
-        arm(id, item.broker);
-      },
-      submit: () => {
-        if (busy.current) return;
-        const v = evaluate(state.draft, state);
-        if (v.decision === "review") {
-          dispatch({ type: "flash", text: "复盘没写完，不能记入转发簿。" });
-          return;
-        }
-        const d = state.draft;
-        const linked = state.sessions[d.broker];
-        const item: LedgerItem = {
-          id: nid(),
-          at: new Date().toISOString(),
-          decision: v.decision,
-          status: v.decision === "block" ? "blocked" : linked ? "queued" : "parked",
-          confirmed: false,
-          broker: d.broker,
-          market: d.market,
-          symbol: v.symbol,
-          name: d.name.trim() || v.symbol,
-          asset: d.asset,
-          side: d.side,
-          intent: d.intent,
-          qty: v.qty,
-          price: v.price,
-          currency: v.currency,
-          notionalCny: v.orderNotionalCny,
-          hold: v.hold,
-          pivotPrice: Number(d.pivotPrice) || 0,
-          pivotNote: d.pivotNote.trim(),
-          stamp: v.primary?.title ?? "无戳记",
-          hits: v.hits.map(({ ruleId, title, severity, clause }) => ({ ruleId, title, severity, clause })),
-        };
-        if (item.status === "blocked") {
-          busy.current = true;
-          window.setTimeout(() => {
-            busy.current = false;
-          }, 400);
-          dispatch({ type: "commit", item, flash: `已拦截 · ${item.stamp}` });
-          return;
-        }
-        if (item.status === "parked") {
-          busy.current = true;
-          window.setTimeout(() => {
-            busy.current = false;
-          }, 400);
-          dispatch({ type: "commit", item, flash: "章过了。通道没挂上，信封停在待挂起。还没送到券商。" });
-          return;
-        }
-        dispatch({ type: "commit", item, flash: "信封已记下，尚未送出。请到券商 App 里手工下单。" });
-        arm(item.id, item.broker);
-      },
-      loadPosition: (id, mode) => {
-        const pos = state.positions.find((p) => p.id === id);
-        if (!pos) return;
-        const held = holdOf(pos, DESK_DATE);
-        dispatch({
-          type: "draft",
-          patch: {
-            broker: pos.broker,
-            market: pos.market,
-            symbol: pos.symbol,
-            name: pos.name,
-            asset: pos.asset,
-            side: mode === "close" ? "sell" : "buy",
-            intent: mode === "close" ? "close" : "add",
-            qty: mode === "close" ? String(pos.qty) : pos.asset === "option" ? "1" : "100",
-            price: String(pos.price),
-            holdDays: mode === "close" ? 0 : held <= 0 ? 0 : held <= 3 ? held : held <= 30 ? held : 45,
-            tag: "none",
-            plan: emptyPlan(),
-            optionExit: "",
-            optionMaxLoss: "",
-            reviewNote: "",
-            pivotPrice: pos.pivotPrice ? String(pos.pivotPrice) : "",
-            pivotNote: pos.pivotNote ?? "",
-            pivotState: mode === "close" ? "gone" : "holds",
+      await send({ type: "requeue", id });
+      if (stateRef.current.ledger.some((row) => row.id === id && row.status === "queued")) arm(id, item.broker);
+      else busy.current = false;
+    },
+    submit: async () => {
+      if (busy.current) return;
+      const id = nid();
+      await send({ type: "submit", id, at: new Date().toISOString() });
+      const item = stateRef.current.ledger.find((row) => row.id === id);
+      if (!item) return;
+      if (item.status === "blocked" || item.status === "parked") {
+        busy.current = true;
+        window.setTimeout(() => { busy.current = false; }, 400);
+        return;
+      }
+      busy.current = true;
+      arm(item.id, item.broker);
+    },
+    loadPosition: (id, mode) => {
+      const pos = state.positions.find((p) => p.id === id);
+      if (!pos) return;
+      const held = holdOf(pos, shanghaiDate(new Date()));
+      send({
+        type: "draft",
+        patch: {
+          positionId: pos.id,
+          broker: pos.broker,
+          market: pos.market,
+          symbol: pos.symbol,
+          name: pos.name,
+          asset: pos.asset,
+          side: mode === "close" ? "sell" : "buy",
+          intent: mode === "close" ? "close" : "add",
+          qty: mode === "close" ? String(pos.qty) : pos.asset === "option" ? "1" : "100",
+          price: String(pos.currentPrice ?? pos.price),
+          holdDays: mode === "close" ? 0 : held <= 0 ? 0 : held <= 3 ? held : held <= 30 ? held : 45,
+          tag: "none",
+          plan: {
+            ...emptyPlan(),
+            strategy: pos.strategy ?? null,
+            correlationGroup: pos.correlationGroup ?? "",
+            marketStage: pos.marketStage ?? "unknown",
+            setup: pos.setup ?? "standard",
+            invalidation: pos.invalidation ? String(pos.invalidation) : "",
           },
-        });
-        setTab("ticket");
-      },
-    };
-  }, [state, tab, verdict]);
+          optionExit: "",
+          optionMaxLoss: "",
+          reviewNote: "",
+          pivotPrice: pos.pivotPrice ? String(pos.pivotPrice) : "",
+          pivotNote: pos.pivotNote ?? "",
+          pivotState: mode === "close" ? "gone" : "holds",
+        },
+      });
+      setTab("ticket");
+    },
+  }), [state, tab, verdict, send, arm]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

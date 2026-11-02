@@ -35,7 +35,7 @@ function fakeJwt(claims: Record<string, unknown>): string {
 
 async function withStubbedGate(
   status: number,
-  body: Record<string, unknown>,
+  body: Record<string, unknown> | null,
   run: (calls: () => number) => Promise<void>,
 ): Promise<void> {
   process.env.GROK_CONNECTORS_URL = "https://connectors.invalid.example";
@@ -43,7 +43,7 @@ async function withStubbedGate(
   let calls = 0;
   globalThis.fetch = (async () => {
     calls += 1;
-    return new Response(JSON.stringify(body), { status });
+    return new Response(body === null ? null : JSON.stringify(body), { status });
   }) as typeof fetch;
   try {
     await run(() => calls);
@@ -52,6 +52,36 @@ async function withStubbedGate(
     delete process.env.GROK_CONNECTORS_URL;
   }
 }
+
+describe("callTool HTTP status handling", () => {
+  it("rejects an empty redirect instead of returning an empty success", async () => {
+    await withStubbedGate(302, null, async () => {
+      const result = await callTool(
+        "google_drive_search",
+        { q: "redirect-302" },
+        {
+          connectorType: ConnectorType.GoogleDrive,
+          token: fakeJwt({ sub: "redirect-302", iat: 1000, exp: 2000 }),
+        },
+      );
+      assert.deepEqual(result, { ok: false, data: null, errorMessage: "HTTP 302" });
+    });
+  });
+
+  it("does not let an ok payload override a non-2xx status", async () => {
+    await withStubbedGate(500, { ok: true, data: { hidden: true } }, async () => {
+      const result = await callTool(
+        "google_drive_search",
+        { q: "status-500" },
+        {
+          connectorType: ConnectorType.GoogleDrive,
+          token: fakeJwt({ sub: "status-500", iat: 1000, exp: 2000 }),
+        },
+      );
+      assert.deepEqual(result, { ok: false, data: null, errorMessage: "HTTP 500" });
+    });
+  });
+});
 
 describe("callTool failure memo", () => {
   it("replays an identical failure within the memo window without refetching", async () => {

@@ -143,7 +143,12 @@ export function acceptsHtml(accept) {
 
 /** The same URL without the install-tutorial params (used as the app link). */
 export function stripInstallParams(url) {
-  const [path = "/", query = ""] = String(url ?? "/").split("?", 2);
+  const [rawPath = "/", query = ""] = String(url ?? "/").split("?", 2);
+  const unsafe = Array.from(rawPath).some((char) => {
+    const code = char.charCodeAt(0);
+    return code <= 31 || code === 127 || char === "\\";
+  });
+  const path = rawPath.startsWith("/") && !rawPath.startsWith("//") && !unsafe ? rawPath : "/";
   const params = new URLSearchParams(query);
   params.delete("install");
   params.delete("platform");

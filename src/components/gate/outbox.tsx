@@ -11,12 +11,12 @@ import {
   sideLabel,
   type LedgerItem,
 } from "@/lib/gate/engine";
-import { decisionTone, decisionWord } from "@/components/gate/bits";
+import { decisionTone, decisionWord, TextInput } from "@/components/gate/bits";
 
 type Filter = "all" | "delivered" | "blocked" | "parked";
 
 export function Outbox() {
-  const { state, requeue, confirm } = useDesk();
+  const { state, requeue, confirm, setActualFee } = useDesk();
   const [filter, setFilter] = useState<Filter>("all");
   const [open, setOpen] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -95,12 +95,32 @@ export function Outbox() {
               {expanded && (
                 <div className="border-t border-line px-4 py-3">
                   <p className="text-sm leading-6">{item.stamp}</p>
+                  <p className="mt-1 break-all font-mono text-xs text-dim">
+                    {item.planId ?? "历史无合同"} · {item.strategy ?? "未分策略"} · 计划R {item.plannedRiskR?.toFixed(3) ?? "未知"}
+                  </p>
+                  <p className="mt-1 font-mono text-xs text-dim">
+                    费用预算 {item.feeBudget ?? "未知"} · 实际费用 {item.actualFee ?? "未知"} · FX {item.fxRate ?? "未知"} {item.fxAsOf ?? ""}
+                  </p>
                   <p className="mt-1 font-mono text-xs text-dim">名义 {formatCny(item.notionalCny)} · {item.ticket ?? item.id}</p>
                   <ul className="mt-2 flex flex-col gap-1">
                     {item.hits.filter((h) => h.severity !== "info").slice(0, 4).map((h) => (
                       <li key={h.ruleId + h.title} className="font-mono text-xs text-dim">{h.clause}</li>
                     ))}
                   </ul>
+                  <label className="mt-3 block text-xs text-dim">
+                    实际费用（空白为未知）
+                    <TextInput
+                      aria-label={`${item.symbol}实际费用`}
+                      inputMode="decimal"
+                      defaultValue={item.actualFee ?? ""}
+                      onBlur={(event) => {
+                        const raw = event.target.value.trim();
+                        const parsed = Number(raw);
+                        setActualFee(item.id, raw && Number.isFinite(parsed) && parsed >= 0 ? parsed : null);
+                      }}
+                      className="mt-1"
+                    />
+                  </label>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button type="button" onClick={() => copy(item)} className="min-h-11 rounded-lg border border-line px-3 text-sm">
                       {copied === item.id ? "已复制" : "复制信封"}

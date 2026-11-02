@@ -2,6 +2,7 @@ import { genericOAuthClient } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
 import { runPreSignInSignOut, runSignOut } from "../../../scripts/sign-out-plan.mjs";
 import { GROK_PROVIDERS } from "./providers";
+import { isPopupMessageFor, type PopupMessage } from "./popup-message";
 
 /**
  * Better Auth client for this React SPA (browser-side).
@@ -78,9 +79,6 @@ function inLivePreview(): boolean {
     window.location.hostname.endsWith(".grok-sandbox.com")
   );
 }
-
-/** Message the popup posts back to the opener once sign-in completes. */
-type PopupMessage = { source: "grok-auth-popup"; token: string | null; error?: string };
 
 /**
  * Start sign-in with one upstream provider (`providerId` from `GROK_PROVIDERS`),
@@ -185,10 +183,9 @@ function waitForPopupToken(popup: Window): Promise<string | null> {
       resolve(token);
     };
     const onMessage = (event: MessageEvent) => {
-      if (event.origin !== origin) return;
-      const data = event.data as PopupMessage | undefined;
-      if (!data || data.source !== "grok-auth-popup") return;
-      settle(data.token ?? null);
+      if (!isPopupMessageFor(event, origin, popup)) return;
+      const data = event.data as PopupMessage;
+      settle(data.token);
     };
     // Fallback when the user dismisses the popup. Grace period lets the
     // completion page's postMessage win over a racing `popup.closed`.

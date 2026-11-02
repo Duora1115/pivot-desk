@@ -8,7 +8,7 @@ import {
   appNameFromHost,
   createHeadInjector,
   grokXCreatorHeadTags,
-  injectGrokPwaHead,
+  injectGrokPwaHead as injectGrokPwaHeadImpl,
   isDocumentPath,
   isInstallQuery,
   publicAppHost,
@@ -20,6 +20,11 @@ import {
 import { renderInstallPage } from "./grok-pwa-plugin.mjs";
 
 const TEMPLATE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const EMPTY_CWD = mkdtempSync(join(tmpdir(), "grok-pwa-empty-"));
+
+function injectGrokPwaHead(html, ctx = {}) {
+  return injectGrokPwaHeadImpl(html, { ...ctx, cwd: ctx.cwd ?? EMPTY_CWD });
+}
 
 test("injects before </head>", () => {
   const out = injectGrokPwaHead("<html><head><title>x</title></head><body></body></html>");
@@ -370,7 +375,7 @@ test("injects into documents with no head element", () => {
 });
 
 test("streaming injector matches </HEAD> case-insensitively", () => {
-  const injector = createHeadInjector({ appName: "Wild Race" });
+  const injector = createHeadInjector({ appName: "Wild Race", cwd: EMPTY_CWD });
   const chunks = [
     ...injector.push("<html><HEAD><title>x</title></HE"),
     ...injector.push("AD><body>hello</body></html>"),
@@ -435,7 +440,7 @@ test("uses the app name in the injected title tag", () => {
 });
 
 test("streaming injector handles </head> split across chunks", () => {
-  const injector = createHeadInjector({ appName: "Wild Race" });
+  const injector = createHeadInjector({ appName: "Wild Race", cwd: EMPTY_CWD });
   const chunks = [
     ...injector.push("<html><head><title>x</title></he"),
     ...injector.push("ad><body>hello</body></html>"),
@@ -481,6 +486,17 @@ test("filters non-document paths", () => {
 test("strips install params from the app link", () => {
   assert.equal(stripInstallParams("/?install=1&platform=ios"), "/");
   assert.equal(stripInstallParams("/app?install=1&platform=ios&tab=2"), "/app?tab=2");
+});
+
+test("keeps the install app link same-origin", () => {
+  assert.equal(stripInstallParams("//evil.example/?install=1&platform=ios"), "/");
+  assert.equal(stripInstallParams("https://evil.example/?install=1&platform=ios"), "/");
+  assert.equal(stripInstallParams("/\\evil.example/?install=1&platform=ios"), "/");
+  assert.equal(stripInstallParams("/\t/evil.example/?install=1&platform=ios"), "/");
+  assert.equal(stripInstallParams("/\r\n/evil.example/?install=1&platform=ios"), "/");
+  const html = renderInstallPage("wild-race.grok.me", "//evil.example/?install=1&platform=ios");
+  assert.match(html, /href="\/"/);
+  assert.equal(html.includes('href="//evil.example/'), false);
 });
 
 test("names the install page from host slug", () => {

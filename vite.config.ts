@@ -11,6 +11,8 @@ import { grokPwaPlugin } from "./scripts/grok-pwa-plugin.mjs";
 // @ts-expect-error JS plugin alongside the TS vite config
 import { appEnvPlugin } from "./scripts/app-env-plugin.mjs";
 import { isMigrationFile } from "./scripts/migration-plan.mjs";
+// @ts-expect-error JS helper alongside the TS vite config
+import { authPopupRequestHeaders } from "./scripts/auth-popup-request.mjs";
 
 /** The files `src/lib/db.ts` globs — same directory, same non-recursive scope. */
 function hasGlobbedMigrations(root: string): boolean {
@@ -91,18 +93,7 @@ function authPopupPlugin(): Plugin {
             req.headers["x-forwarded-proto"] ??
               ((req.socket as { encrypted?: boolean } | undefined)?.encrypted ? "https" : "http"),
           );
-          const requestHeaders = new Headers();
-          for (const [key, value] of Object.entries(req.headers)) {
-            if (value === undefined) continue;
-            if (Array.isArray(value)) {
-              for (const v of value) requestHeaders.append(key, v);
-            } else {
-              requestHeaders.set(key, value);
-            }
-          }
-          // Ensure Host is the public preview host so Better Auth's dynamic
-          // baseURL / redirect_uri match the popup origin.
-          if (!requestHeaders.has("host")) requestHeaders.set("host", host);
+          const requestHeaders = authPopupRequestHeaders(req.headers, host);
 
           const request = new Request(`${proto}://${host}${rawUrl}`, {
             method: "GET",

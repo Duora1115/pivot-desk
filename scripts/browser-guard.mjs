@@ -5,7 +5,8 @@
  * path from argv, so unchecked they will render `file:///root/.grok/auth.json`
  * into a PNG the agent can read, and write it anywhere.
  */
-import { resolve, sep } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
@@ -30,15 +31,43 @@ export function checkedUrl(url) {
   return url;
 }
 
-/** Absolute `target` if it is strictly inside `allowedDirs`, else exit 1. */
+/** Absolute canonical `target` if it is strictly inside `allowedDirs`, else exit 1. */
 export function checkedOutputPath(target, allowedDirs, label = "screenshot") {
-  // Resolve first so `..` cannot slip past the prefix check.
-  const abs = resolve(target);
-  const allowed = allowedDirs.some((dir) => abs.startsWith(dir.endsWith(sep) ? dir : dir + sep));
-  if (!allowed) {
-    fail(`${label} path must be under ${allowedDirs.join(" or ")}, got ${abs}`);
+  try {
+    const abs = canonicalPath(target);
+    const allowed = allowedDirs.map((dir) => canonicalPath(dir)).some((root) => {
+      const rest = relative(root, abs);
+      return rest !== "" && rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest);
+    });
+    if (!allowed) {
+      fail(`${label} path must be under ${allowedDirs.join(" or ")}, got ${abs}`);
+    }
+    return abs;
+  } catch {
+    fail(`${label} path could not be resolved safely: ${target}`);
   }
-  return abs;
+}
+
+function canonicalPath(target) {
+  const abs = resolve(target);
+  const missing = [];
+  let ancestor = abs;
+  while (!pathEntryExists(ancestor)) {
+    missing.unshift(basename(ancestor));
+    const parent = dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  return join(realpathSync(ancestor), ...missing);
+}
+
+function pathEntryExists(target) {
+  try {
+    lstatSync(target);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function fail(message) {

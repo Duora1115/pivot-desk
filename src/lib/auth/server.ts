@@ -36,6 +36,7 @@ import { getCookie } from "@tanstack/react-start/server";
 import { randomBytes } from "node:crypto";
 import { Pool } from "pg";
 import { ensureDbReady, getPglite } from "../db";
+import { observeEagerBootstrap } from "../eager-bootstrap";
 import { emailAndPasswordEnabled } from "./email-password";
 import { GATE_PROVIDER_ID, gateIdentitySessions } from "./gate-session.server";
 import { GROK_PROVIDERS } from "./providers";
@@ -48,7 +49,9 @@ import {
 } from "./preview";
 
 // Kick (and share) PGLite bootstrap as soon as the auth server module loads.
-void ensureDbReady();
+void observeEagerBootstrap(ensureDbReady(), (err) => {
+  console.error("[auth] database bootstrap failed:", err);
+});
 
 /**
  * Preview secret must outlive module reloads: PGLite (and its session rows) is

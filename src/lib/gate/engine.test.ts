@@ -4,10 +4,14 @@ import {
   DESK_DATE,
   PRESETS,
   applyToBook,
+  classify,
+  compareCloseRecency,
   daysBetween,
   evaluate,
   holdOf,
   makeSeed,
+  needsPlanPanel,
+  nid,
   settle,
   type DeskState,
   type Draft,
@@ -135,7 +139,7 @@ describe("review regressions", () => {
     assert.equal(settled.positions.some((p) => p.id === "p-avgo"), false);
     assert.equal(settled.closes[0]?.id, "c-t-1");
     assert.equal(settled.closes[0]?.closedAt, DESK_DATE);
-    assert.ok(Math.abs(settled.closes[0]!.pnlCny - (175 - 178) * 20 * 7.12) < 1e-6);
+    assert.ok(Math.abs(settled.closes[0]!.pnlCny! - (175 - 178) * 20 * 7.12) < 1e-6);
     const again = settle(settled.positions, settled.closes, closing);
     assert.equal(again.closes.length, settled.closes.length);
   });
@@ -234,5 +238,88 @@ describe("review regressions", () => {
   it("未放行的委托不改底稿", () => {
     const next = applyToBook(seed.positions, item({ intent: "close", qty: 20, decision: "block" }));
     assert.equal(next, seed.positions);
+  });
+});
+
+describe("review defect regressions", () => {
+  it("同日亏损锚点比较返回相等并保留最新优先输入顺序", () => {
+    const seed = makeSeed();
+    const low = { ...seed.closes[0]!, id: "low", closedAt: DESK_DATE, notionalCny: 100, pnlCny: -1 };
+    const high = { ...seed.closes[0]!, id: "high", closedAt: DESK_DATE, notionalCny: 100000, pnlCny: -2 };
+    assert.equal(compareCloseRecency(low, high), 0);
+    assert.deepEqual([low, high].sort(compareCloseRecency).map((close) => close.id), ["low", "high"]);
+  });
+
+  it("30 日过夜计划不能覆盖 50 日真实持仓", () => {
+    const state = makeSeed();
+    const position = state.positions.find((p) => p.symbol === "AVGO")!;
+    position.openedAt = "2026-09-01";
+    const draft: Draft = {
+      ...structuredClone(PRESETS.find((p) => p.id === "avgo-ht")!.draft),
+      plan: { invalidation: "170", maxNotional: "20000", maxDays: "30", thesis: "华泰过夜测试计划", approved: true },
+    };
+    const verdict = evaluate(draft, state);
+    assert.equal(verdict.hold, 50);
+    assert.equal(verdict.hits.find((hit) => hit.ruleId === "ht-overnight")?.severity, "block");
+
+    position.openedAt = "2026-09-21";
+    const boundary = evaluate(draft, state);
+    assert.equal(boundary.hold, 30);
+    assert.equal(boundary.hits.find((hit) => hit.ruleId === "ht-overnight")?.severity, "info");
+  });
+
+  it("US 4–30 正股规则不误伤 ETF 和债券", () => {
+    for (const asset of ["etf", "bond"] as const) {
+      const draft: Draft = {
+        ...structuredClone(PRESETS.find((p) => p.id === "avgo-ht")!.draft),
+        broker: "gf",
+        symbol: asset === "etf" ? "SPY" : "TLT",
+        name: asset === "etf" ? "标普ETF" : "长债ETF",
+        asset,
+        intent: "open",
+        qty: "1",
+        price: "100",
+        holdDays: 12,
+      };
+      const verdict = evaluate(draft, makeSeed());
+      assert.equal(verdict.hits.some((hit) => hit.ruleId === "us-4-30" && hit.severity === "block"), false);
+      assert.equal(needsPlanPanel(draft, verdict), false);
+      const position = { ...makeSeed().positions.find((p) => p.symbol === "AVGO")!, ...draft, id: `p-${asset}`, asset, broker: "gf" as const, qty: 1, price: 100, openedAt: "2026-10-09", pivotPrice: 170 };
+      assert.notEqual(classify(position).label, "出血 · 4–30日");
+    }
+  });
+
+  it("US 1–3 日计划面板仍适用于 ETF", () => {
+    const draft: Draft = {
+      ...structuredClone(PRESETS.find((p) => p.id === "avgo-ht")!.draft),
+      broker: "gf",
+      asset: "etf",
+      intent: "open",
+      qty: "1",
+      price: "100",
+      holdDays: 2,
+    };
+    const verdict = evaluate(draft, makeSeed());
+    assert.equal(verdict.hold, 2);
+    assert.equal(needsPlanPanel(draft, verdict), true);
+  });
+
+  it("使用订单快照汇率计算实现盈亏，未知汇率保持未知", () => {
+    const closing = item({ intent: "close", qty: 20, decision: "pass", price: 175, fxRate: 7 });
+    const settled = settle(makeSeed().positions, makeSeed().closes, closing);
+    assert.equal(settled.closes[0]?.pnlCny, -420);
+    const unknown = settle(makeSeed().positions, makeSeed().closes, item({ intent: "close", qty: 20, decision: "pass", price: 175, fxRate: null }));
+    assert.equal(unknown.closes[0]?.pnlCny, null);
+  });
+
+  it("结算使用注入的真实日期而非样本日期", () => {
+    const opened = settle([], [], item({ intent: "open", side: "buy", qty: 1, decision: "pass" }), "2026-11-02");
+    assert.equal(opened.positions[0]?.openedAt, "2026-11-02");
+    const closed = settle(makeSeed().positions, makeSeed().closes, item({ intent: "close", qty: 20, decision: "pass" }), "2026-11-03");
+    assert.equal(closed.closes[0]?.closedAt, "2026-11-03");
+  });
+
+  it("新账本 ID 使用注入的 UUID", () => {
+    assert.equal(nid(() => "123e4567-e89b-42d3-a456-426614174000"), "NS-123E4567-E89B-42D3-A456-426614174000");
   });
 });
